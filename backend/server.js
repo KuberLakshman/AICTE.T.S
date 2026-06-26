@@ -27,6 +27,49 @@ const createToken = (payload) => {
     return jwt.sign(payload, getJwtSecret(), { expiresIn: JWT_EXPIRES_IN });
 };
 
+const verifyToken = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || typeof authHeader !== "string") {
+        return res.status(401).json({ message: "Authorization token is required" });
+    }
+
+    const [scheme, token] = authHeader.trim().split(/\s+/);
+
+    if (scheme !== "Bearer" || !token) {
+        return res.status(401).json({ message: "Authorization token is required" });
+    }
+
+    try {
+        req.user = jwt.verify(token, getJwtSecret());
+        return next();
+    } catch (err) {
+        console.error("JWT verification error:", err.message);
+
+        if (err.code === "JWT_SECRET_MISSING") {
+            return res.status(500).json({ message: "Server authentication is not configured" });
+        }
+
+        return res.status(403).json({ message: "Invalid or expired token" });
+    }
+};
+
+const requireStudent = (req, res, next) => {
+    if (!req.user || req.user.role !== "student") {
+        return res.status(403).json({ message: "Student access required" });
+    }
+
+    return next();
+};
+
+const requireTeacher = (req, res, next) => {
+    if (!req.user || req.user.role !== "teacher") {
+        return res.status(403).json({ message: "Teacher access required" });
+    }
+
+    return next();
+};
+
 const withoutPassword = (user) => {
     if (!user || typeof user !== "object") {
         return {};
@@ -222,7 +265,7 @@ app.post("/login", (req, res) => {
     });
 });
 
-app.get("/student/:id", (req, res) => {
+app.get("/student/:id", verifyToken, requireTeacher, (req, res) => {
     const { id } = req.params;
     const sql = `
         SELECT student_id, full_name, usn, email, phone, branch, semester, section, total_points
@@ -248,44 +291,61 @@ const updateTotalPoints = (student_id) => {
     });
 };
 
-app.post("/activities", (req, res) => {
-    const { student_id, activity_name, activity_date, points } = req.body;
+app.post("/activities", verifyToken, requireStudent, (req, res) => {
+    const student_id = req.user.id;
+    const { activity_name, activity_date, points } = req.body;
     const sql = "INSERT INTO activities (student_id, activity_name, activity_date, points) VALUES (?, ?, ?, ?)";
     
-    db.query(sql, [student_id, activity_name, activity_date, points], (err, result) => {
+    db.query(sql, [student_id, activity_name, activity_date, points], (err) => {
         if (err) return res.status(500).json({ message: "Error adding activity" });
         updateTotalPoints(student_id);
         res.json({ message: "Activity added successfully" });
     });
 });
 
-app.get("/activities/:studentId", (req, res) => {
+app.get("/activities/:studentId", verifyToken, requireStudent, (req, res) => {
     const { studentId } = req.params;
-    db.query("SELECT * FROM activities WHERE student_id = ? ORDER BY activity_date DESC", [studentId], (err, results) => {
+
+    if (String(studentId) !== String(req.user.id)) {
+        return res.status(403).json({ message: "Access denied" });
+    }
+
+    db.query("SELECT * FROM activities WHERE student_id = ? ORDER BY activity_date DESC", [req.user.id], (err, results) => {
         if (err) return res.status(500).json({ message: "Database Error" });
         res.json(results);
     });
 });
 
-app.put("/activities/:id", (req, res) => {
+app.put("/activities/:id", verifyToken, requireStudent, (req, res) => {
     const { id } = req.params;
-    const { activity_name, activity_date, points, student_id } = req.body;
-    const sql = "UPDATE activities SET activity_name=?, activity_date=?, points=? WHERE activity_id=?";
+    const student_id = req.user.id;
+    const { activity_name, activity_date, points } = req.body;
+    const sql = "UPDATE activities SET activity_name=?, activity_date=?, points=? WHERE activity_id=? AND student_id=?";
     
-    db.query(sql, [activity_name, activity_date, points, id], (err, result) => {
+    db.query(sql, [activity_name, activity_date, points, id, student_id], (err, result) => {
         if (err) return res.status(500).json({ message: "Error updating activity" });
-        if (student_id) updateTotalPoints(student_id);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "Activity not found" });
+        }
+
+        updateTotalPoints(student_id);
         res.json({ message: "Activity updated successfully" });
     });
 });
 
-app.delete("/activities/:id", (req, res) => {
+app.delete("/activities/:id", verifyToken, requireStudent, (req, res) => {
     const { id } = req.params;
-    const { student_id } = req.query; // pass student_id to update total_points
+    const student_id = req.user.id;
     
-    db.query("DELETE FROM activities WHERE activity_id=?", [id], (err, result) => {
+    db.query("DELETE FROM activities WHERE activity_id=? AND student_id=?", [id, student_id], (err, result) => {
         if (err) return res.status(500).json({ message: "Error deleting activity" });
-        if (student_id) updateTotalPoints(student_id);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "Activity not found" });
+        }
+
+        updateTotalPoints(student_id);
         res.json({ message: "Activity deleted successfully" });
     });
 });
@@ -374,14 +434,14 @@ app.post("/teacher/login", (req, res) => {
     });
 });
 
-app.get("/students", (req, res) => {
+app.get("/students", verifyToken, requireTeacher, (req, res) => {
     db.query("SELECT student_id, usn, full_name, branch, semester, section, total_points FROM students", (err, results) => {
         if (err) return res.status(500).json({ message: "Database Error" });
         res.json(results);
     });
 });
 
-app.get("/students/filter", (req, res) => {
+app.get("/students/filter", verifyToken, requireTeacher, (req, res) => {
     const { branch, semester, section } = req.query;
     let sql = "SELECT student_id, usn, full_name, branch, semester, section, total_points FROM students WHERE 1=1";
     const params = [];
