@@ -327,71 +327,213 @@ app.get("/student/:id", verifyToken, requireTeacher, (req, res) => {
 
 // --- Activity APIs ---
 
-const updateTotalPoints = (student_id) => {
-    db.query("SELECT SUM(points) as total FROM activities WHERE student_id = ?", [student_id], (err, result) => {
-        if (!err) {
-            const total = result[0].total || 0;
-            db.query("UPDATE students SET total_points = ? WHERE student_id = ?", [total, student_id]);
+const parsePositiveId = (value) => {
+    const rawValue = typeof value === "string" ? value.trim() : "";
+
+    if (!/^\d+$/.test(rawValue)) {
+        return null;
+    }
+
+    const parsedValue = Number(rawValue);
+    return Number.isSafeInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+};
+
+const validateActivityData = (body) => {
+    const { activity_name, activity_date, points } = body || {};
+
+    if (activity_name === undefined || activity_name === null) {
+        return { error: "activity_name is required" };
+    }
+
+    const activityName = typeof activity_name === "string" ? activity_name.trim() : "";
+
+    if (!activityName) {
+        return { error: "activity_name cannot be empty" };
+    }
+
+    if (activity_date === undefined || activity_date === null || String(activity_date).trim() === "") {
+        return { error: "activity_date is required" };
+    }
+
+    const activityDate = String(activity_date).trim();
+    const parsedDate = new Date(activityDate);
+
+    if (Number.isNaN(parsedDate.getTime())) {
+        return { error: "activity_date must be a valid date" };
+    }
+
+    const dateOnlyMatch = activityDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (dateOnlyMatch) {
+        const year = Number(dateOnlyMatch[1]);
+        const month = Number(dateOnlyMatch[2]);
+        const day = Number(dateOnlyMatch[3]);
+
+        if (
+            parsedDate.getUTCFullYear() !== year ||
+            parsedDate.getUTCMonth() + 1 !== month ||
+            parsedDate.getUTCDate() !== day
+        ) {
+            return { error: "activity_date must be a valid date" };
         }
+    }
+
+    if (points === undefined || points === null || String(points).trim() === "") {
+        return { error: "points is required" };
+    }
+
+    if (typeof points !== "number" && typeof points !== "string") {
+        return { error: "points must be a valid integer" };
+    }
+
+    const parsedPoints = Number(points);
+
+    if (!Number.isSafeInteger(parsedPoints)) {
+        return { error: "points must be a valid integer" };
+    }
+
+    if (parsedPoints < 0) {
+        return { error: "points cannot be negative" };
+    }
+
+    return {
+        activity_name: activityName,
+        activity_date: activityDate,
+        points: parsedPoints
+    };
+};
+
+const updateTotalPoints = (student_id, callback) => {
+    db.query("SELECT COALESCE(SUM(points), 0) as total FROM activities WHERE student_id = ?", [student_id], (sumErr, result) => {
+        if (sumErr) {
+            return callback(sumErr);
+        }
+
+        const total = result[0].total || 0;
+
+        db.query("UPDATE students SET total_points = ? WHERE student_id = ?", [total, student_id], (updateErr) => {
+            if (updateErr) {
+                return callback(updateErr);
+            }
+
+            return callback(null);
+        });
     });
 };
 
 app.post("/activities", verifyToken, requireStudent, (req, res) => {
     const student_id = req.user.id;
-    const { activity_name, activity_date, points } = req.body;
+    const activityData = validateActivityData(req.body);
+
+    if (activityData.error) {
+        return res.status(400).json({ message: activityData.error });
+    }
+
     const sql = "INSERT INTO activities (student_id, activity_name, activity_date, points) VALUES (?, ?, ?, ?)";
     
-    db.query(sql, [student_id, activity_name, activity_date, points], (err) => {
-        if (err) return res.status(500).json({ message: "Error adding activity" });
-        updateTotalPoints(student_id);
-        res.json({ message: "Activity added successfully" });
+    db.query(sql, [student_id, activityData.activity_name, activityData.activity_date, activityData.points], (err) => {
+        if (err) {
+            console.error("Add activity database error:", err.message);
+            return res.status(500).json({ message: "Unable to add activity" });
+        }
+
+        updateTotalPoints(student_id, (totalErr) => {
+            if (totalErr) {
+                console.error("Add activity total points recalculation error:", totalErr.message);
+                return res.status(500).json({ message: "Unable to recalculate total points" });
+            }
+
+            return res.json({ message: "Activity added successfully" });
+        });
     });
 });
 
 app.get("/activities/:studentId", verifyToken, requireStudent, (req, res) => {
-    const { studentId } = req.params;
+    const studentId = typeof req.params.studentId === "string" ? req.params.studentId.trim() : "";
 
     if (String(studentId) !== String(req.user.id)) {
         return res.status(403).json({ message: "Access denied" });
     }
 
-    db.query("SELECT * FROM activities WHERE student_id = ? ORDER BY activity_date DESC", [req.user.id], (err, results) => {
-        if (err) return res.status(500).json({ message: "Database Error" });
-        res.json(results);
+    const sql = `
+        SELECT activity_id, activity_name, activity_date, points
+        FROM activities
+        WHERE student_id = ?
+        ORDER BY activity_date DESC
+    `;
+
+    db.query(sql, [req.user.id], (err, results) => {
+        if (err) {
+            console.error("Get activities database error:", err.message);
+            return res.status(500).json({ message: "Unable to load activities" });
+        }
+
+        return res.json(results);
     });
 });
 
 app.put("/activities/:id", verifyToken, requireStudent, (req, res) => {
-    const { id } = req.params;
     const student_id = req.user.id;
-    const { activity_name, activity_date, points } = req.body;
+    const activityId = parsePositiveId(req.params.id);
+    const activityData = validateActivityData(req.body);
+
+    if (!activityId) {
+        return res.status(400).json({ message: "Valid activity ID is required" });
+    }
+
+    if (activityData.error) {
+        return res.status(400).json({ message: activityData.error });
+    }
+
     const sql = "UPDATE activities SET activity_name=?, activity_date=?, points=? WHERE activity_id=? AND student_id=?";
     
-    db.query(sql, [activity_name, activity_date, points, id, student_id], (err, result) => {
-        if (err) return res.status(500).json({ message: "Error updating activity" });
+    db.query(sql, [activityData.activity_name, activityData.activity_date, activityData.points, activityId, student_id], (err, result) => {
+        if (err) {
+            console.error("Update activity database error:", err.message);
+            return res.status(500).json({ message: "Unable to update activity" });
+        }
 
         if (result.affectedRows === 0) {
             return res.status(404).json({ message: "Activity not found" });
         }
 
-        updateTotalPoints(student_id);
-        res.json({ message: "Activity updated successfully" });
+        updateTotalPoints(student_id, (totalErr) => {
+            if (totalErr) {
+                console.error("Update activity total points recalculation error:", totalErr.message);
+                return res.status(500).json({ message: "Unable to recalculate total points" });
+            }
+
+            return res.json({ message: "Activity updated successfully" });
+        });
     });
 });
 
 app.delete("/activities/:id", verifyToken, requireStudent, (req, res) => {
-    const { id } = req.params;
     const student_id = req.user.id;
+    const activityId = parsePositiveId(req.params.id);
+
+    if (!activityId) {
+        return res.status(400).json({ message: "Valid activity ID is required" });
+    }
     
-    db.query("DELETE FROM activities WHERE activity_id=? AND student_id=?", [id, student_id], (err, result) => {
-        if (err) return res.status(500).json({ message: "Error deleting activity" });
+    db.query("DELETE FROM activities WHERE activity_id=? AND student_id=?", [activityId, student_id], (err, result) => {
+        if (err) {
+            console.error("Delete activity database error:", err.message);
+            return res.status(500).json({ message: "Unable to delete activity" });
+        }
 
         if (result.affectedRows === 0) {
             return res.status(404).json({ message: "Activity not found" });
         }
 
-        updateTotalPoints(student_id);
-        res.json({ message: "Activity deleted successfully" });
+        updateTotalPoints(student_id, (totalErr) => {
+            if (totalErr) {
+                console.error("Delete activity total points recalculation error:", totalErr.message);
+                return res.status(500).json({ message: "Unable to recalculate total points" });
+            }
+
+            return res.json({ message: "Activity deleted successfully" });
+        });
     });
 });
 
