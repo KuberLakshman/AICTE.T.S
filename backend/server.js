@@ -96,6 +96,138 @@ const getMissingFields = (body, requiredFields) => {
     });
 };
 
+const trimString = (value) => {
+    return typeof value === "string" ? value.trim() : "";
+};
+
+const isVvceEmail = (email) => {
+    return email.toLowerCase().endsWith("@vvce.ac.in");
+};
+
+const validatePassword = (password) => {
+    if (typeof password !== "string" || password.trim() === "") {
+        return "Password is required";
+    }
+
+    if (password.trim().length < 6) {
+        return "Password must be at least 6 characters";
+    }
+
+    return null;
+};
+
+const getDuplicateRegistrationMessage = (err, duplicateMessages) => {
+    if (err.code !== "ER_DUP_ENTRY") {
+        return null;
+    }
+
+    const duplicateField = `${err.message || ""} ${err.sqlMessage || ""}`.toLowerCase();
+
+    for (const [field, message] of duplicateMessages) {
+        if (duplicateField.includes(field)) {
+            return message;
+        }
+    }
+
+    return "Registration value is already in use";
+};
+
+const validateStudentRegistration = (body) => {
+    const data = body || {};
+    const missingFields = getMissingFields(data, [
+        "full_name",
+        "usn",
+        "email",
+        "password",
+        "branch",
+        "semester",
+        "section"
+    ]);
+
+    if (missingFields.length > 0) {
+        return { error: `Missing required fields: ${missingFields.join(", ")}` };
+    }
+
+    const fullName = trimString(data.full_name);
+    const usn = trimString(data.usn);
+    const email = trimString(data.email).toLowerCase();
+    const phone = data.phone === undefined || data.phone === null ? "" : String(data.phone).trim();
+    const branch = trimString(data.branch);
+    const semester = Number(data.semester);
+    const section = trimString(data.section).toUpperCase();
+    const passwordError = validatePassword(data.password);
+
+    if (!fullName) return { error: "full_name is required" };
+    if (!usn) return { error: "usn is required" };
+    if (!email) return { error: "email is required" };
+    if (!isVvceEmail(email)) return { error: "Only VVCE emails are allowed" };
+    if (phone && !/^\d{10}$/.test(phone)) return { error: "Phone must be a valid 10-digit number" };
+    if (passwordError) return { error: passwordError };
+    if (!branch) return { error: "branch is required" };
+    if (!Number.isInteger(semester) || semester < 1 || semester > 8) {
+        return { error: "Semester must be a number between 1 and 8" };
+    }
+    if (!/^[A-Z]$/.test(section)) {
+        return { error: "Section must be a single alphabet character" };
+    }
+
+    return {
+        full_name: fullName,
+        usn,
+        email,
+        phone: phone || null,
+        password: data.password,
+        branch,
+        semester,
+        section
+    };
+};
+
+const validateTeacherRegistration = (body) => {
+    const data = body || {};
+    const missingFields = getMissingFields(data, ["full_name", "email", "password", "branch"]);
+
+    if (missingFields.length > 0) {
+        return { error: `Missing required fields: ${missingFields.join(", ")}` };
+    }
+
+    const fullName = trimString(data.full_name);
+    const email = trimString(data.email).toLowerCase();
+    const branch = trimString(data.branch);
+    const passwordError = validatePassword(data.password);
+
+    if (!fullName) return { error: "full_name is required" };
+    if (!email) return { error: "email is required" };
+    if (!isVvceEmail(email)) return { error: "Only VVCE emails are allowed" };
+    if (passwordError) return { error: passwordError };
+    if (!branch) return { error: "branch is required" };
+
+    return {
+        full_name: fullName,
+        email,
+        password: data.password,
+        branch
+    };
+};
+
+const validateLoginData = (body) => {
+    const data = body || {};
+    const email = trimString(data.email).toLowerCase();
+
+    if (!email) {
+        return { error: "Email is required" };
+    }
+
+    if (typeof data.password !== "string" || data.password.trim() === "") {
+        return { error: "Password is required" };
+    }
+
+    return {
+        email,
+        password: data.password
+    };
+};
+
 // --- Database Initialization ---
 const initDb = () => {
     // Create Students Table
@@ -162,47 +294,41 @@ app.get("/", (req, res) => {
 // --- Student APIs ---
 
 app.post("/register", async (req, res) => {
-    const body = req.body || {};
-    const { full_name, usn, email, phone, password, branch, semester, section } = body;
-    const missingFields = getMissingFields(body, [
-        "full_name",
-        "usn",
-        "email",
-        "password",
-        "branch",
-        "semester",
-        "section"
-    ]);
+    const studentData = validateStudentRegistration(req.body);
 
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: `Missing required fields: ${missingFields.join(", ")}`
-        });
-    }
-
-    if (!email.endsWith("@vvce.ac.in")) {
-        return res.status(400).json({ message: "Only VVCE emails are allowed" });
+    if (studentData.error) {
+        return res.status(400).json({ message: studentData.error });
     }
 
     try {
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(studentData.password, 10);
         const sql = `
             INSERT INTO students
             (full_name, usn, email, phone, password, branch, semester, section)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
-        db.query(sql, [full_name, usn, email, phone, hashedPassword, branch, semester, section], (err) => {
+        db.query(sql, [
+            studentData.full_name,
+            studentData.usn,
+            studentData.email,
+            studentData.phone,
+            hashedPassword,
+            studentData.branch,
+            studentData.semester,
+            studentData.section
+        ], (err) => {
             if (err) {
                 console.error("Student registration database error:", err.message);
-                if (err.code === "ER_DUP_ENTRY") {
-                    const duplicateField = err.sqlMessage || "";
-                    if (duplicateField.includes("usn")) {
-                        return res.status(409).json({ message: "USN is already registered" });
-                    }
-                    if (duplicateField.includes("email")) {
-                        return res.status(409).json({ message: "Email is already registered" });
-                    }
+
+                const duplicateMessage = getDuplicateRegistrationMessage(err, [
+                    ["usn", "USN is already registered"],
+                    ["email", "Email is already registered"],
+                    ["phone", "Phone is already registered"]
+                ]);
+
+                if (duplicateMessage) {
+                    return res.status(409).json({ message: duplicateMessage });
                 }
 
                 return res.status(500).json({ message: "Unable to register student due to a server or database error" });
@@ -217,22 +343,18 @@ app.post("/register", async (req, res) => {
 });
 
 app.post("/login", (req, res) => {
-    const body = req.body || {};
-    const { email, password } = body;
-    const missingFields = getMissingFields(body, ["email", "password"]);
+    const loginData = validateLoginData(req.body);
 
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: `Missing required fields: ${missingFields.join(", ")}`
-        });
+    if (loginData.error) {
+        return res.status(400).json({ message: loginData.error });
     }
 
     const sql = "SELECT * FROM students WHERE email = ?";
     
-    db.query(sql, [email], async (err, result) => {
+    db.query(sql, [loginData.email], async (err, result) => {
         if (err) {
             console.error("Student login database error:", err.message);
-            return res.status(500).json({ message: "Database Error" });
+            return res.status(500).json({ message: "Unable to complete login due to a database error" });
         }
 
         if (result.length === 0) {
@@ -242,7 +364,7 @@ app.post("/login", (req, res) => {
         const student = result[0];
 
         try {
-            const passwordMatches = await bcrypt.compare(password, student.password);
+            const passwordMatches = await bcrypt.compare(loginData.password, student.password);
 
             if (!passwordMatches) {
                 return res.status(401).json({ message: "Invalid password" });
@@ -540,25 +662,26 @@ app.delete("/activities/:id", verifyToken, requireStudent, (req, res) => {
 // --- Teacher APIs ---
 
 app.post("/teacher/register", async (req, res) => {
-    const body = req.body || {};
-    const { full_name, email, password, branch } = body;
-    const missingFields = getMissingFields(body, ["full_name", "email", "password", "branch"]);
+    const teacherData = validateTeacherRegistration(req.body);
 
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: `Missing required fields: ${missingFields.join(", ")}`
-        });
+    if (teacherData.error) {
+        return res.status(400).json({ message: teacherData.error });
     }
 
     try {
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(teacherData.password, 10);
         const sql = "INSERT INTO teachers (full_name, email, password, branch) VALUES (?, ?, ?, ?)";
         
-        db.query(sql, [full_name, email, hashedPassword, branch], (err) => {
+        db.query(sql, [teacherData.full_name, teacherData.email, hashedPassword, teacherData.branch], (err) => {
             if (err) {
                 console.error("Teacher registration database error:", err.message);
-                if (err.code === "ER_DUP_ENTRY" && (err.sqlMessage || "").includes("email")) {
-                    return res.status(409).json({ message: "teacher email is already registered" });
+
+                const duplicateMessage = getDuplicateRegistrationMessage(err, [
+                    ["email", "Teacher email is already registered"]
+                ]);
+
+                if (duplicateMessage) {
+                    return res.status(409).json({ message: duplicateMessage });
                 }
 
                 return res.status(500).json({ message: "Unable to register teacher due to a server or database error" });
@@ -573,22 +696,18 @@ app.post("/teacher/register", async (req, res) => {
 });
 
 app.post("/teacher/login", (req, res) => {
-    const body = req.body || {};
-    const { email, password } = body;
-    const missingFields = getMissingFields(body, ["email", "password"]);
+    const loginData = validateLoginData(req.body);
 
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: `Missing required fields: ${missingFields.join(", ")}`
-        });
+    if (loginData.error) {
+        return res.status(400).json({ message: loginData.error });
     }
 
     const sql = "SELECT * FROM teachers WHERE email = ?";
     
-    db.query(sql, [email], async (err, result) => {
+    db.query(sql, [loginData.email], async (err, result) => {
         if (err) {
             console.error("Teacher login database error:", err.message);
-            return res.status(500).json({ message: "Database Error" });
+            return res.status(500).json({ message: "Unable to complete login due to a database error" });
         }
 
         if (result.length === 0) {
@@ -598,7 +717,7 @@ app.post("/teacher/login", (req, res) => {
         const teacher = result[0];
 
         try {
-            const passwordMatches = await bcrypt.compare(password, teacher.password);
+            const passwordMatches = await bcrypt.compare(loginData.password, teacher.password);
 
             if (!passwordMatches) {
                 return res.status(401).json({ message: "Invalid password" });
