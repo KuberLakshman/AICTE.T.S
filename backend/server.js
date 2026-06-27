@@ -479,6 +479,57 @@ app.post("/teacher/login", (req, res) => {
     });
 });
 
+app.get("/teacher/student/:id/details", verifyToken, requireTeacher, (req, res) => {
+    const rawStudentId = typeof req.params.id === "string" ? req.params.id.trim() : "";
+    const studentId = Number(rawStudentId);
+
+    if (!rawStudentId || !Number.isInteger(studentId) || studentId <= 0) {
+        return res.status(400).json({ message: "Valid student ID is required" });
+    }
+
+    const studentSql = `
+        SELECT student_id, full_name, usn, email, phone, branch, semester, section, total_points
+        FROM students
+        WHERE student_id = ?
+    `;
+
+    db.query(studentSql, [studentId], (studentErr, studentResult) => {
+        if (studentErr) {
+            console.error("Teacher student details profile database error:", studentErr.message);
+            return res.status(500).json({ message: "Unable to load student details" });
+        }
+
+        if (studentResult.length === 0) {
+            return res.status(404).json({ message: "Student not found" });
+        }
+
+        const activitiesSql = `
+            SELECT activity_id, activity_name, activity_date, points
+            FROM activities
+            WHERE student_id = ?
+            ORDER BY activity_date DESC
+        `;
+
+        db.query(activitiesSql, [studentId], (activitiesErr, activities) => {
+            if (activitiesErr) {
+                console.error("Teacher student details activities database error:", activitiesErr.message);
+                return res.status(500).json({ message: "Unable to load student details" });
+            }
+
+            const student = studentResult[0];
+
+            return res.json({
+                student,
+                summary: {
+                    total_points: student.total_points || 0,
+                    total_activities: activities.length
+                },
+                activities
+            });
+        });
+    });
+});
+
 app.get("/students", verifyToken, requireTeacher, (req, res) => {
     db.query("SELECT student_id, usn, full_name, branch, semester, section, total_points FROM students", (err, results) => {
         if (err) return res.status(500).json({ message: "Database Error" });
