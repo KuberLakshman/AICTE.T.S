@@ -513,25 +513,43 @@ app.get("/students/search", verifyToken, requireTeacher, (req, res) => {
 
 app.get("/students/filter", verifyToken, requireTeacher, (req, res) => {
     const { branch, semester, section } = req.query;
-    let sql = "SELECT student_id, usn, full_name, branch, semester, section, total_points FROM students WHERE 1=1";
+    const filters = [];
     const params = [];
+    const branchFilter = typeof branch === "string" ? branch.trim() : "";
+    const semesterFilter = typeof semester === "string" ? semester.trim() : "";
+    const sectionFilter = typeof section === "string" ? section.trim() : "";
     
-    if (branch) {
-        sql += " AND branch = ?";
-        params.push(branch);
+    if (branchFilter) {
+        filters.push("branch = ?");
+        params.push(branchFilter);
     }
-    if (semester) {
-        sql += " AND semester = ?";
-        params.push(semester);
+    if (semesterFilter) {
+        filters.push("semester = ?");
+        params.push(semesterFilter);
     }
-    if (section) {
-        sql += " AND section = ?";
-        params.push(section);
+    if (sectionFilter) {
+        filters.push("section = ?");
+        params.push(sectionFilter);
     }
+
+    if (filters.length === 0) {
+        return res.status(400).json({ message: "At least one filter parameter is required" });
+    }
+
+    const sql = `
+        SELECT student_id, usn, full_name, branch, semester, section, total_points
+        FROM students
+        WHERE ${filters.join(" AND ")}
+        ORDER BY branch ASC, semester ASC, section ASC, full_name ASC
+    `;
     
     db.query(sql, params, (err, results) => {
-        if (err) return res.status(500).json({ message: "Database Error" });
-        res.json(results);
+        if (err) {
+            console.error("Student filter database error:", err.message);
+            return res.status(500).json({ message: "Unable to filter students" });
+        }
+
+        return res.json(results);
     });
 });
 
